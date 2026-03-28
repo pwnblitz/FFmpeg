@@ -28,6 +28,7 @@
 #include "url.h"
 #include "tls.h"
 #include "libavutil/opt.h"
+#include "libavutil/file_open.h"
 
 #include <openssl/bio.h>
 #include <openssl/ssl.h>
@@ -607,6 +608,29 @@ static av_cold void init_bio_method(URLContext *h)
     SSL_set_bio(c->ssl, bio, bio);
 }
 
+static void openssl_keylog_callback(const SSL *ssl, const char *line)
+{
+    TLSContext *c = (TLSContext *)SSL_get_ex_data(ssl, 0);
+    TLSShared *s = &c->tls_shared;
+    const char *path = s->keylog_file;
+    FILE *fp;
+
+    if (!path || !path[0]) {
+        char *env = getenv("SSLKEYLOGFILE");
+        if (!env || !env[0])
+            return;
+        path = env;
+    }
+
+    fp = avpriv_fopen_utf8(path, "a");
+    if (!fp) {
+        av_log(c, AV_LOG_WARNING, "Failed to open keylog file: %s\n", path);
+        return;
+    }
+    fprintf(fp, "%s\n", line);
+    fclose(fp);
+}
+
 static void openssl_info_callback(const SSL *ssl, int where, int ret) {
     const char *method = "undefined";
     TLSContext *c = (TLSContext*)SSL_get_ex_data(ssl, 0);
@@ -795,6 +819,8 @@ static int dtls_start(URLContext *h, const char *url, int flags, AVDictionary **
         goto fail;
     }
 
+    SSL_CTX_set_keylog_callback(c->ctx, openssl_keylog_callback);
+
     ret = openssl_init_ca_key_cert(h);
     if (ret < 0) goto fail;
 
@@ -884,6 +910,7 @@ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **op
         ret = AVERROR(EIO);
         goto fail;
     }
+    SSL_CTX_set_keylog_callback(c->ctx, openssl_keylog_callback);
     if (!SSL_CTX_set_min_proto_version(c->ctx, TLS1_VERSION)) {
         av_log(h, AV_LOG_ERROR, "Failed to set minimum TLS version to TLSv1\n");
         ret = AVERROR_EXTERNAL;

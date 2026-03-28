@@ -26,6 +26,8 @@
 #include "internal.h"
 #include "libavutil/random_seed.h"
 #include "libavutil/md5.h"
+#include "libavutil/sha.h"
+#include "libavutil/sha512.h"
 #include "urldecode.h"
 
 static void handle_basic_params(HTTPAuthState *state, const char *key,
@@ -119,21 +121,172 @@ void ff_http_auth_handle_header(HTTPAuthState *state, const char *key,
 }
 
 
-static void update_md5_strings(struct AVMD5 *md5ctx, ...)
+enum DigestAlgo {
+    DIGEST_ALGO_MD5,
+    DIGEST_ALGO_MD5_SESS,
+    DIGEST_ALGO_SHA256,
+    DIGEST_ALGO_SHA256_SESS,
+    DIGEST_ALGO_SHA512_256,
+    DIGEST_ALGO_SHA512_256_SESS,
+    DIGEST_ALGO_UNKNOWN,
+};
+
+static enum DigestAlgo get_digest_algo(const char *algorithm)
+{
+    if (!strcmp(algorithm, "") || !strcmp(algorithm, "MD5"))
+        return DIGEST_ALGO_MD5;
+    if (!strcmp(algorithm, "MD5-sess"))
+        return DIGEST_ALGO_MD5_SESS;
+    if (!strcmp(algorithm, "SHA-256"))
+        return DIGEST_ALGO_SHA256;
+    if (!strcmp(algorithm, "SHA-256-sess"))
+        return DIGEST_ALGO_SHA256_SESS;
+    if (!strcmp(algorithm, "SHA-512-256"))
+        return DIGEST_ALGO_SHA512_256;
+    if (!strcmp(algorithm, "SHA-512-256-sess"))
+        return DIGEST_ALGO_SHA512_256_SESS;
+    return DIGEST_ALGO_UNKNOWN;
+}
+
+static int digest_is_sess(enum DigestAlgo algo)
+{
+    return algo == DIGEST_ALGO_MD5_SESS ||
+           algo == DIGEST_ALGO_SHA256_SESS ||
+           algo == DIGEST_ALGO_SHA512_256_SESS;
+}
+
+/**
+ * Hash context wrapper that abstracts over MD5, SHA-256, and SHA-512/256.
+ */
+typedef struct DigestHashContext {
+    enum DigestAlgo algo;
+    int hash_len;           /* digest output length in bytes */
+    union {
+        struct AVMD5    *md5;
+        struct AVSHA    *sha256;
+        struct AVSHA512 *sha512;
+    } ctx;
+} DigestHashContext;
+
+static int digest_hash_alloc(DigestHashContext *h, enum DigestAlgo algo)
+{
+    h->algo = algo;
+    switch (algo) {
+    case DIGEST_ALGO_MD5:
+    case DIGEST_ALGO_MD5_SESS:
+        h->hash_len = 16;
+        h->ctx.md5 = av_md5_alloc();
+        return h->ctx.md5 ? 0 : -1;
+    case DIGEST_ALGO_SHA256:
+    case DIGEST_ALGO_SHA256_SESS:
+        h->hash_len = 32;
+        h->ctx.sha256 = av_sha_alloc();
+        return h->ctx.sha256 ? 0 : -1;
+    case DIGEST_ALGO_SHA512_256:
+    case DIGEST_ALGO_SHA512_256_SESS:
+        h->hash_len = 32;
+        h->ctx.sha512 = av_sha512_alloc();
+        return h->ctx.sha512 ? 0 : -1;
+    default:
+        return -1;
+    }
+}
+
+static void digest_hash_init(DigestHashContext *h)
+{
+    switch (h->algo) {
+    case DIGEST_ALGO_MD5:
+    case DIGEST_ALGO_MD5_SESS:
+        av_md5_init(h->ctx.md5);
+        break;
+    case DIGEST_ALGO_SHA256:
+    case DIGEST_ALGO_SHA256_SESS:
+        av_sha_init(h->ctx.sha256, 256);
+        break;
+    case DIGEST_ALGO_SHA512_256:
+    case DIGEST_ALGO_SHA512_256_SESS:
+        av_sha512_init(h->ctx.sha512, 256);
+        break;
+    default:
+        break;
+    }
+}
+
+static void digest_hash_update(DigestHashContext *h, const uint8_t *data, size_t len)
+{
+    switch (h->algo) {
+    case DIGEST_ALGO_MD5:
+    case DIGEST_ALGO_MD5_SESS:
+        av_md5_update(h->ctx.md5, data, len);
+        break;
+    case DIGEST_ALGO_SHA256:
+    case DIGEST_ALGO_SHA256_SESS:
+        av_sha_update(h->ctx.sha256, data, len);
+        break;
+    case DIGEST_ALGO_SHA512_256:
+    case DIGEST_ALGO_SHA512_256_SESS:
+        av_sha512_update(h->ctx.sha512, data, len);
+        break;
+    default:
+        break;
+    }
+}
+
+static void digest_hash_final(DigestHashContext *h, uint8_t *digest)
+{
+    switch (h->algo) {
+    case DIGEST_ALGO_MD5:
+    case DIGEST_ALGO_MD5_SESS:
+        av_md5_final(h->ctx.md5, digest);
+        break;
+    case DIGEST_ALGO_SHA256:
+    case DIGEST_ALGO_SHA256_SESS:
+        av_sha_final(h->ctx.sha256, digest);
+        break;
+    case DIGEST_ALGO_SHA512_256:
+    case DIGEST_ALGO_SHA512_256_SESS:
+        av_sha512_final(h->ctx.sha512, digest);
+        break;
+    default:
+        break;
+    }
+}
+
+static void digest_hash_free(DigestHashContext *h)
+{
+    switch (h->algo) {
+    case DIGEST_ALGO_MD5:
+    case DIGEST_ALGO_MD5_SESS:
+        av_free(h->ctx.md5);
+        break;
+    case DIGEST_ALGO_SHA256:
+    case DIGEST_ALGO_SHA256_SESS:
+        av_free(h->ctx.sha256);
+        break;
+    case DIGEST_ALGO_SHA512_256:
+    case DIGEST_ALGO_SHA512_256_SESS:
+        av_free(h->ctx.sha512);
+        break;
+    default:
+        break;
+    }
+}
+
+static void digest_hash_update_strings(DigestHashContext *h, ...)
 {
     va_list vl;
 
-    va_start(vl, md5ctx);
+    va_start(vl, h);
     while (1) {
-        const char* str = va_arg(vl, const char*);
+        const char *str = va_arg(vl, const char *);
         if (!str)
             break;
-        av_md5_update(md5ctx, str, strlen(str));
+        digest_hash_update(h, (const uint8_t *)str, strlen(str));
     }
     va_end(vl);
 }
 
-/* Generate a digest reply, according to RFC 2617. */
+/* Generate a digest reply, according to RFC 2617 / RFC 7616. */
 static char *make_digest_auth(HTTPAuthState *state, const char *username,
                               const char *password, const char *uri,
                               const char *method)
@@ -144,10 +297,18 @@ static char *make_digest_auth(HTTPAuthState *state, const char *username,
     char cnonce[17];
     char nc[9];
     int i;
-    char A1hash[33], A2hash[33], response[33];
-    struct AVMD5 *md5ctx;
-    uint8_t hash[16];
+    enum DigestAlgo algo;
+    DigestHashContext hashctx;
+    char A1hash[65], A2hash[65], response[65];
+    uint8_t hash[32];
     char *authstr;
+
+    algo = get_digest_algo(digest->algorithm);
+    if (algo == DIGEST_ALGO_UNKNOWN)
+        return NULL;
+
+    if (digest_hash_alloc(&hashctx, algo) < 0)
+        return NULL;
 
     digest->nc++;
     snprintf(nc, sizeof(nc), "%08x", digest->nc);
@@ -157,42 +318,37 @@ static char *make_digest_auth(HTTPAuthState *state, const char *username,
         cnonce_buf[i] = av_get_random_seed();
     ff_data_to_hex(cnonce, (const uint8_t*) cnonce_buf, sizeof(cnonce_buf), 1);
 
-    md5ctx = av_md5_alloc();
-    if (!md5ctx)
-        return NULL;
+    /* Compute A1 hash: H(username:realm:password) */
+    digest_hash_init(&hashctx);
+    digest_hash_update_strings(&hashctx, username, ":", state->realm, ":", password, NULL);
+    digest_hash_final(&hashctx, hash);
+    ff_data_to_hex(A1hash, hash, hashctx.hash_len, 1);
 
-    av_md5_init(md5ctx);
-    update_md5_strings(md5ctx, username, ":", state->realm, ":", password, NULL);
-    av_md5_final(md5ctx, hash);
-    ff_data_to_hex(A1hash, hash, 16, 1);
-
-    if (!strcmp(digest->algorithm, "") || !strcmp(digest->algorithm, "MD5")) {
-    } else if (!strcmp(digest->algorithm, "MD5-sess")) {
-        av_md5_init(md5ctx);
-        update_md5_strings(md5ctx, A1hash, ":", digest->nonce, ":", cnonce, NULL);
-        av_md5_final(md5ctx, hash);
-        ff_data_to_hex(A1hash, hash, 16, 1);
-    } else {
-        /* Unsupported algorithm */
-        av_free(md5ctx);
-        return NULL;
+    /* For -sess variants: A1 = H(H(username:realm:password):nonce:cnonce) */
+    if (digest_is_sess(algo)) {
+        digest_hash_init(&hashctx);
+        digest_hash_update_strings(&hashctx, A1hash, ":", digest->nonce, ":", cnonce, NULL);
+        digest_hash_final(&hashctx, hash);
+        ff_data_to_hex(A1hash, hash, hashctx.hash_len, 1);
     }
 
-    av_md5_init(md5ctx);
-    update_md5_strings(md5ctx, method, ":", uri, NULL);
-    av_md5_final(md5ctx, hash);
-    ff_data_to_hex(A2hash, hash, 16, 1);
+    /* Compute A2 hash: H(method:uri) */
+    digest_hash_init(&hashctx);
+    digest_hash_update_strings(&hashctx, method, ":", uri, NULL);
+    digest_hash_final(&hashctx, hash);
+    ff_data_to_hex(A2hash, hash, hashctx.hash_len, 1);
 
-    av_md5_init(md5ctx);
-    update_md5_strings(md5ctx, A1hash, ":", digest->nonce, NULL);
+    /* Compute response: H(A1hash:nonce[:nc:cnonce:qop]:A2hash) */
+    digest_hash_init(&hashctx);
+    digest_hash_update_strings(&hashctx, A1hash, ":", digest->nonce, NULL);
     if (!strcmp(digest->qop, "auth") || !strcmp(digest->qop, "auth-int")) {
-        update_md5_strings(md5ctx, ":", nc, ":", cnonce, ":", digest->qop, NULL);
+        digest_hash_update_strings(&hashctx, ":", nc, ":", cnonce, ":", digest->qop, NULL);
     }
-    update_md5_strings(md5ctx, ":", A2hash, NULL);
-    av_md5_final(md5ctx, hash);
-    ff_data_to_hex(response, hash, 16, 1);
+    digest_hash_update_strings(&hashctx, ":", A2hash, NULL);
+    digest_hash_final(&hashctx, hash);
+    ff_data_to_hex(response, hash, hashctx.hash_len, 1);
 
-    av_free(md5ctx);
+    digest_hash_free(&hashctx);
 
     if (!strcmp(digest->qop, "") || !strcmp(digest->qop, "auth")) {
     } else if (!strcmp(digest->qop, "auth-int")) {

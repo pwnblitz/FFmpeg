@@ -64,6 +64,9 @@ typedef struct TLSShared {
      * Note that pion requires a smaller value, for example, 1200.
      */
     int mtu;
+
+    char *keylog_file;     /**< Path to TLS key log file for traffic decryption (NSS Key Log Format).
+                             *  If NULL, falls back to the SSLKEYLOGFILE environment variable. */
 } TLSShared;
 
 #define TLS_OPTFL (AV_OPT_FLAG_DECODING_PARAM | AV_OPT_FLAG_ENCODING_PARAM)
@@ -93,6 +96,7 @@ typedef struct TLSShared {
     {"mtu", "Maximum Transmission Unit", offsetof(pstruct, options_field . mtu), AV_OPT_TYPE_INT,  { .i64 = 0 }, 0, INT_MAX, .flags = TLS_OPTFL}, \
     {"cert_pem",   "Certificate PEM string",              offsetof(pstruct, options_field . cert_buf),  AV_OPT_TYPE_STRING, .flags = TLS_OPTFL }, \
     {"key_pem",    "Private key PEM string",              offsetof(pstruct, options_field . key_buf),   AV_OPT_TYPE_STRING, .flags = TLS_OPTFL }, \
+    {"keylog_file", "TLS key log file path (NSS format, for Wireshark)", offsetof(pstruct, options_field . keylog_file), AV_OPT_TYPE_STRING, .flags = TLS_OPTFL }, \
     FF_TLS_CLIENT_OPTIONS(pstruct, options_field)
 
 int ff_tls_open_underlying(TLSShared *c, URLContext *parent, const char *uri, AVDictionary **options);

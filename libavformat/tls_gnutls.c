@@ -34,6 +34,7 @@
 #include "libavutil/opt.h"
 #include "libavutil/thread.h"
 #include "libavutil/random_seed.h"
+#include "libavutil/file_open.h"
 
 #ifndef GNUTLS_VERSION_NUMBER
 #define GNUTLS_VERSION_NUMBER LIBGNUTLS_VERSION_NUMBER
@@ -524,6 +525,45 @@ end:
     return ret;
 }
 
+#if GNUTLS_VERSION_NUMBER >= 0x030613
+static int gnutls_keylog_callback(gnutls_session_t session, const char *label,
+                                  const gnutls_datum_t *secret)
+{
+    TLSContext *c = (TLSContext *)gnutls_session_get_ptr(session);
+    TLSShared *s = &c->tls_shared;
+    const char *path = s->keylog_file;
+    gnutls_datum_t client_random;
+    FILE *fp;
+    unsigned int i;
+
+    if (!path || !path[0]) {
+        char *env = getenv("SSLKEYLOGFILE");
+        if (!env || !env[0])
+            return 0;
+        path = env;
+    }
+
+    gnutls_session_get_random(session, &client_random, NULL);
+    if (!client_random.data || client_random.size == 0)
+        return 0;
+
+    fp = avpriv_fopen_utf8(path, "a");
+    if (!fp) {
+        av_log(c, AV_LOG_WARNING, "Failed to open keylog file: %s\n", path);
+        return 0;
+    }
+    fprintf(fp, "%s ", label);
+    for (i = 0; i < client_random.size; i++)
+        fprintf(fp, "%02x", client_random.data[i]);
+    fprintf(fp, " ");
+    for (i = 0; i < secret->size; i++)
+        fprintf(fp, "%02x", secret->data[i]);
+    fprintf(fp, "\n");
+    fclose(fp);
+    return 0;
+}
+#endif
+
 static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **options)
 {
     TLSContext *c = h->priv_data;
@@ -548,6 +588,10 @@ static int tls_open(URLContext *h, const char *uri, int flags, AVDictionary **op
     else
         gnutls_flags |= GNUTLS_CLIENT;
     gnutls_init(&c->session, gnutls_flags);
+#if GNUTLS_VERSION_NUMBER >= 0x030613
+    if (s->keylog_file || getenv("SSLKEYLOGFILE"))
+        gnutls_session_set_keylog_function(c->session, gnutls_keylog_callback);
+#endif
     if (!s->listen && !s->numerichost)
         gnutls_server_name_set(c->session, GNUTLS_NAME_DNS, s->host, strlen(s->host));
     gnutls_certificate_allocate_credentials(&c->cred);
