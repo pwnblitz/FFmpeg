@@ -1,38 +1,39 @@
 #!/bin/bash
 set -e
 
-# FFmpeg WSL Build Script (Ubuntu/Debian)
-# SHA-256/SHA-512-256 digest auth + SSL keylog support
+# FFmpeg WSL Static Build Script (Ubuntu/Debian)
+# Produces standalone ffmpeg/ffplay/ffprobe binaries with zero runtime dependencies.
 #
 # Usage:
 #   chmod +x build_wsl.sh
-#   ./build_wsl.sh          # full build (install deps + compile)
-#   ./build_wsl.sh --no-deps  # skip apt install (deps already installed)
+#   ./build_wsl.sh              # full build (install deps + compile)
+#   ./build_wsl.sh --no-deps    # skip apt install
+#   ./build_wsl.sh --prefix=DIR # change output directory (default: ./build)
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 NPROC=$(nproc 2>/dev/null || echo 4)
-PREFIX="/usr/local"
+PREFIX="$SCRIPT_DIR/build"
 SKIP_DEPS=0
 
 for arg in "$@"; do
     case "$arg" in
-        --no-deps) SKIP_DEPS=1 ;;
+        --no-deps)  SKIP_DEPS=1 ;;
         --prefix=*) PREFIX="${arg#--prefix=}" ;;
         -h|--help)
-            echo "Usage: $0 [--no-deps] [--prefix=/usr/local]"
+            echo "Usage: $0 [--no-deps] [--prefix=./build]"
             exit 0
             ;;
     esac
 done
 
-echo "=== FFmpeg WSL Build ==="
+echo "=== FFmpeg WSL Static Build ==="
 echo "  Source:  $SCRIPT_DIR"
-echo "  Prefix:  $PREFIX"
+echo "  Output:  $PREFIX/bin/"
 echo "  Jobs:    $NPROC"
 echo ""
 
 ########################################
-# 1. Install dependencies
+# 1. Install build dependencies
 ########################################
 if [ "$SKIP_DEPS" -eq 0 ]; then
     echo ">>> Installing build dependencies..."
@@ -52,6 +53,9 @@ if [ "$SKIP_DEPS" -eq 0 ]; then
         libopus-dev \
         libass-dev \
         libfreetype-dev \
+        libfontconfig-dev \
+        libfribidi-dev \
+        libharfbuzz-dev \
         libsdl2-dev \
         libva-dev \
         libvdpau-dev \
@@ -63,25 +67,41 @@ if [ "$SKIP_DEPS" -eq 0 ]; then
         libunistring-dev \
         libdrm-dev \
         libpulse-dev \
-        libasound2-dev
+        libasound2-dev \
+        libsrt-gnutls-dev \
+        libgmp-dev \
+        libtasn1-6-dev \
+        libp11-kit-dev \
+        nettle-dev \
+        libbz2-dev \
+        liblzma-dev \
+        libxml2-dev
     echo ">>> Dependencies installed."
 else
     echo ">>> Skipping dependency install (--no-deps)"
 fi
 
 ########################################
-# 2. Configure
+# 2. Configure (static)
 ########################################
 echo ""
-echo ">>> Configuring FFmpeg..."
+echo ">>> Configuring FFmpeg (static)..."
 cd "$SCRIPT_DIR"
+
+# pkg-config must find .a files
+export PKG_CONFIG="pkg-config --static"
 
 ./configure \
     --prefix="$PREFIX" \
+    --pkg-config-flags="--static" \
+    --extra-cflags="-static" \
+    --extra-ldflags="-static" \
+    --extra-libs="-lpthread -lm" \
+    --enable-static \
+    --disable-shared \
     --enable-gpl \
     --enable-nonfree \
     --enable-openssl \
-    --enable-gnutls \
     --enable-libx264 \
     --enable-libx265 \
     --enable-libvpx \
@@ -107,12 +127,11 @@ make -j"$NPROC"
 echo ">>> Build complete."
 
 ########################################
-# 4. Install (optional)
+# 4. Install to prefix
 ########################################
 echo ""
 echo ">>> Installing to $PREFIX ..."
-sudo make install
-sudo ldconfig
+make install
 echo ">>> Install complete."
 
 ########################################
@@ -120,13 +139,34 @@ echo ">>> Install complete."
 ########################################
 echo ""
 echo "=== Verification ==="
-echo -n "ffmpeg:  "; ffmpeg -version 2>/dev/null | head -1 || echo "(not in PATH)"
-echo -n "ffplay:  "; ffplay -version 2>/dev/null | head -1 || echo "(not in PATH)"
-echo -n "ffprobe: "; ffprobe -version 2>/dev/null | head -1 || echo "(not in PATH)"
+FFMPEG="$PREFIX/bin/ffmpeg"
+FFPLAY="$PREFIX/bin/ffplay"
+FFPROBE="$PREFIX/bin/ffprobe"
+
+for bin in "$FFMPEG" "$FFPLAY" "$FFPROBE"; do
+    if [ -f "$bin" ]; then
+        name=$(basename "$bin")
+        size=$(du -sh "$bin" | cut -f1)
+        printf "  %-8s %s  %s\n" "$name" "$size" "$("$bin" -version 2>/dev/null | head -1)"
+        # Show it's truly static (no dynamic deps)
+        if ldd "$bin" 2>&1 | grep -q "not a dynamic"; then
+            echo "           -> fully static binary"
+        else
+            echo "           -> dynamically linked (some libs may not have static .a)"
+        fi
+    fi
+done
 
 echo ""
-echo "=== TLS keylog test ==="
-echo "  ffplay -keylog_file /tmp/keys.log rtsps://host/stream"
-echo "  SSLKEYLOGFILE=/tmp/keys.log ffplay rtsps://host/stream"
+echo "=== Output binaries ==="
+echo "  $PREFIX/bin/ffmpeg"
+echo "  $PREFIX/bin/ffplay"
+echo "  $PREFIX/bin/ffprobe"
+echo ""
+echo "Copy these files anywhere and run without installing dependencies."
+echo ""
+echo "=== TLS keylog usage ==="
+echo "  $FFPLAY -keylog_file /tmp/keys.log rtsps://host/stream"
+echo "  SSLKEYLOGFILE=/tmp/keys.log $FFPLAY rtsps://host/stream"
 echo ""
 echo "Done!"
