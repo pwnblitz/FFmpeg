@@ -81,7 +81,6 @@ cd "$SCRIPT_DIR"
     --enable-gpl \
     --enable-nonfree \
     --enable-openssl \
-    --enable-gnutls \
     --enable-libx264 \
     --enable-libx265 \
     --enable-libvpx \
